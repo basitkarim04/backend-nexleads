@@ -10,29 +10,119 @@ const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRE });
 };
 
-// Signup
 exports.signup = async (req, res) => {
   const { name, email, password, confirmPassword } = req.body;
 
-  if (password !== confirmPassword) return res.status(400).json({ message: 'Passwords do not match' });
-
   try {
+
+    if (password !== confirmPassword) {
+      return res.status(400).json({ message: "Passwords do not match" });
+    }
+
     const userExists = await User.findOne({ email });
-    if (userExists) return res.status(400).json({ message: 'User already exists' });
+    if (userExists) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    const nexleadsEmail = generateNexleadsEmail(name);
-    const user = await User.create({ name, email, password, nexleadsEmail });
-    const token = generateToken(user._id);
-
-    res.status(201).json({
-      success: true,
-      token,
-      user: { id: user._id, name: user.name, email: user.email }
+    await User.create({
+      name,
+      email,
+      password,
+      emailOtp: otp,
+      emailOtpExpires: Date.now() + 10 * 60 * 1000, // 10 min
     });
-  } catch (err) {
+
+    await transporter.sendMail({
+      from: `"NexLeads" <${process.env.EMAIL_FROM}>`,
+      to: email,
+      subject: "Verification Code",
+      html: `
+    <div style="font-family: Arial, sans-serif; padding: 20px;">
+      <h2>Email Verification</h2>
+      <p>Your verification code is:</p>
+      <h1 style="letter-spacing: 4px;">${otp}</h1>
+      <p>This code will expire in 10 minutes.</p>
+      <p>If you did not request this, please ignore this email.</p>
+    </div>
+  `,
+    });
+
+
+
+    res.status(200).json({
+      success: true,
+      message: "Verification code sent to email",
+    });
+  } catch (error) {
     res.status(500).json({ message: err.message });
   }
 };
+
+exports.verifyEmail = async (req, res) => {
+  const { email, otp } = req.body;
+
+  const user = await User.findOne({ email });
+
+  if (!user) {
+    return res.status(400).json({ message: "User not found" });
+  }
+
+  if (user.emailOtp !== otp) {
+    return res.status(400).json({ message: "Invalid code" });
+  }
+
+  if (user.emailOtpExpires < Date.now()) {
+    return res.status(400).json({ message: "Code expired" });
+  }
+
+  user.isEmailVerified = true;
+  user.emailOtp = undefined;
+  user.emailOtpExpires = undefined;
+
+  const nexleadsEmail = generateNexleadsEmail(user.name);
+  user.nexleadsEmail = nexleadsEmail;
+
+  await user.save();
+
+  const token = generateToken(user._id);
+
+  res.status(200).json({
+    success: true,
+    token,
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+    },
+  });
+};
+
+
+
+// Signup
+// exports.signup = async (req, res) => {
+//   const { name, email, password, confirmPassword } = req.body;
+
+//   if (password !== confirmPassword) return res.status(400).json({ message: 'Passwords do not match' });
+
+//   try {
+//     const userExists = await User.findOne({ email });
+//     if (userExists) return res.status(400).json({ message: 'User already exists' });
+
+//     const nexleadsEmail = generateNexleadsEmail(name);
+//     const user = await User.create({ name, email, password, nexleadsEmail });
+//     const token = generateToken(user._id);
+
+//     res.status(201).json({
+//       success: true,
+//       token,
+//       user: { id: user._id, name: user.name, email: user.email }
+//     });
+//   } catch (err) {
+//     res.status(500).json({ message: err.message });
+//   }
+// };
 
 // Login
 exports.login = async (req, res) => {
@@ -114,7 +204,11 @@ exports.resetPassword = async (req, res) => {
 
 exports.getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('-password');
+    const user = await User.findById(req.user.id).select('-password');
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
     res.json({ user });
   } catch (error) {
     res.status(500).json({ message: 'Error fetching profile', error: error.message });

@@ -1,5 +1,5 @@
 const express = require('express');
-const { signup, login, forgotPassword, resetPassword, getProfile } = require('../controllers/authController');
+const { signup, login, forgotPassword, resetPassword, getProfile, verifyEmail } = require('../controllers/authController');
 const { verifyToken } = require('../middlewares/jwtToken');
 const { getDashboardStats } = require('../controllers/dashboardController');
 const leadControllers = require('../controllers/leadController');
@@ -12,7 +12,9 @@ const { upload } = require('../middlewares/upload');
 
 const router = express.Router();
 
-router.post('/signup', signup);
+router.post("/signup", signup);
+router.post("/verify-email", verifyEmail);
+
 router.post('/login', login);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
