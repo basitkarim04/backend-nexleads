@@ -1,5 +1,5 @@
 const { body, validationResult } = require('express-validator');
-const User = require('../models/User');
+const User = require('../models/user');
 
 exports.checkLeadsLimit = async (req, res, next) => {
   try {

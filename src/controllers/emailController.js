@@ -1,7 +1,7 @@
 
-const Email = require('../models/Email');
-const Lead = require('../models/Lead');
-const User = require('../models/User');
+const Email = require('../models/email');
+const Lead = require('../models/lead');
+const User = require('../models/user');
 
 const { sendEmail, sendBulkEmails } = require('../utils/helper');
 const { uploadToS3 } = require('../utils/s3Uploader');

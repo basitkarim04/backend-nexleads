@@ -1,5 +1,5 @@
-const Project = require('../models/Project');
-const Lead = require('../models/Lead');
+const Project = require('../models/project');
+const Lead = require('../models/lead');
 
 exports.createProject = async (req, res) => {
   try {

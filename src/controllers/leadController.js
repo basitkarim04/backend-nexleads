@@ -1,5 +1,5 @@
 const { fetchLeadsFromPlatforms } = require("../utils/leadfetcher");
-const Lead = require('../models/Lead');
+const Lead = require('../models/lead');
 
 exports.searchLeads = async (req, res) => {
   try {

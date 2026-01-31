@@ -1,6 +1,6 @@
-const Email = require('../models/Email');
-const Lead = require('../models/Lead');
-const Project = require('../models/Project');
+const Email = require('../models/email');
+const Lead = require('../models/lead');
+const Project = require('../models/project');
 
 exports.getDashboardStats = async (req, res) => {
   try {

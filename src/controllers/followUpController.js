@@ -1,5 +1,5 @@
 const FollowUp = require('../models/FollowUp');
-const Email = require('../models/Email');
+const Email = require('../models/email');
 const { sendBulkEmails } = require('../utils/helper');
 
 
