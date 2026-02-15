@@ -28,6 +28,7 @@ exports.signup = async (req, res) => {
     await User.create({
       name,
       email,
+      type: 'User',
       password,
       emailOtp: otp,
       emailOtpExpires: Date.now() + 10 * 60 * 1000, // 10 min
@@ -94,35 +95,11 @@ exports.verifyEmail = async (req, res) => {
       id: user._id,
       name: user.name,
       email: user.email,
+      type: user.type,
     },
   });
 };
 
-
-
-// Signup
-// exports.signup = async (req, res) => {
-//   const { name, email, password, confirmPassword } = req.body;
-
-//   if (password !== confirmPassword) return res.status(400).json({ message: 'Passwords do not match' });
-
-//   try {
-//     const userExists = await User.findOne({ email });
-//     if (userExists) return res.status(400).json({ message: 'User already exists' });
-
-//     const nexleadsEmail = generateNexleadsEmail(name);
-//     const user = await User.create({ name, email, password, nexleadsEmail });
-//     const token = generateToken(user._id);
-
-//     res.status(201).json({
-//       success: true,
-//       token,
-//       user: { id: user._id, name: user.name, email: user.email }
-//     });
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
 
 // Login
 exports.login = async (req, res) => {
@@ -133,13 +110,16 @@ exports.login = async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
+    if (user.blocked) {
+      return res.status(403).json({ message: 'User is blocked. Please contact support.' });
+    }
 
     const token = generateToken(user._id);
 
     res.json({
       success: true,
       token,
-      user: { id: user._id, name: user.name, email: user.email }
+      user: { id: user._id, name: user.name, email: user.email, type: user.type }
     });
   } catch (err) {
     res.status(500).json({ message: err.message });

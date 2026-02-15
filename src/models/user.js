@@ -10,6 +10,11 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  type: String,
+  blocked: {
+    type: Boolean,
+    default: false,
+  },
   bio: String,
   emailOtp: String,
   emailOtpExpires: Date,
