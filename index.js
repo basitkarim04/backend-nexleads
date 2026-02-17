@@ -33,7 +33,7 @@ app.use((req, res, next) => {
 app.use("/uploads/", express.static("uploads"));
 app.use("/api", routers);
 
-startEmailSyncJob();
+// startEmailSyncJob();
 
 const PORT = process.env.PORT || 5000;
 
