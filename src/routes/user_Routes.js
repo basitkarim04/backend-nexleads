@@ -10,6 +10,7 @@ const settingsController = require('../controllers/settingContoller');
 const { checkBulkEmailAccess, validateEmail, handleValidationErrors, checkLeadsLimit } = require('../middlewares/validate');
 const { upload } = require('../middlewares/upload');
 const { generateOrRewriteEmail } = require('../controllers/gptContoroller');
+const { submitContactForm } = require('../controllers/contactController');
 
 const router = express.Router();
 
@@ -79,5 +80,7 @@ router.post('/payment-intent', verifyToken, settingsController.createPaymentInte
 router.post('/subscription', verifyToken, settingsController.updateSubscription);
 router.get('/subscription/history', verifyToken, settingsController.getSubscriptionHistory);
 router.post('/subscription/cancel', verifyToken, settingsController.cancelSubscription);
+
+router.post('/submit-contact-form', submitContactForm);
 
 module.exports = router;
