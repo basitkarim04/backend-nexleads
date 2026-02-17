@@ -8,6 +8,7 @@ const nodemailer = require("nodemailer");
 const http = require("http");
 const initializeSocket = require("./src/socket");
 const { default: axios } = require("axios");
+const { startEmailSyncJob } = require("./src/utils/cronJobs");
 // const cronJobs = require("./src/utils/cronJobs");
 
 const app = express();
@@ -31,6 +32,8 @@ app.use((req, res, next) => {
 
 app.use("/uploads/", express.static("uploads"));
 app.use("/api", routers);
+
+startEmailSyncJob();
 
 const PORT = process.env.PORT || 5000;
 
