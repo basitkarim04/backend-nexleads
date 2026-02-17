@@ -52,9 +52,25 @@ const emailSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+   messageId: {
+    type: String,
+    index: true,
+  },
+  inReplyTo: {
+    type: String,
+    index: true,
+  },
+  threadId: {
+    type: String,
+    index: true,
+  },
+  references: [String],
   sentAt: {
     type: Date,
     default: Date.now,
+  },
+  receivedAt: {
+    type: Date,
   },
 });
 
