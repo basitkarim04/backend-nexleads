@@ -41,7 +41,7 @@ exports.submitContactForm = async (req, res) => {
     // Send email to admin
     const adminEmailOptions = {
       from: `"NexLeads Contact Form" <${process.env.SMTP_EMAIL}>`,
-      to: process.env.ADMIN_EMAIL || process.env.SMTP_EMAIL,
+      to: "basit.karimkarim@gmail.com",
       subject: `New Contact Form Submission: ${subject}`,
       html: `
         <!DOCTYPE html>
