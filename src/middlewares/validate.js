@@ -1,4 +1,4 @@
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, query } = require('express-validator');
 const User = require('../models/user');
 
 exports.checkLeadsLimit = async (req, res, next) => {
@@ -68,6 +68,29 @@ exports.validateEmail = [
   // body('to').isEmail().withMessage('Valid recipient email is required'),
   body('subject').notEmpty().withMessage('Subject is required'),
   body('body').notEmpty().withMessage('Email body is required'),
+];
+
+exports.validateSearch = [
+  query('keyword')
+    .notEmpty()
+    .withMessage('Search keyword is required')
+    .trim(),
+
+  query('platforms')
+    .notEmpty()
+    .withMessage('At least one platform is required')
+    .isArray()
+    .withMessage('Platforms must be an array'),
+
+  query('dateFrom')
+    .optional()
+    .isISO8601()
+    .withMessage('dateFrom must be a valid ISO 8601 date'),
+
+  query('dateTo')
+    .optional()
+    .isISO8601()
+    .withMessage('dateTo must be a valid ISO 8601 date')
 ];
 
 exports.handleValidationErrors = (req, res, next) => {

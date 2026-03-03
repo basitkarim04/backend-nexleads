@@ -7,7 +7,7 @@ const emailsController = require('../controllers/emailController');
 const projectsController = require('../controllers/projectController');
 const followupsController = require('../controllers/followUpController');
 const settingsController = require('../controllers/settingContoller');
-const { checkBulkEmailAccess, validateEmail, handleValidationErrors, checkLeadsLimit } = require('../middlewares/validate');
+const { checkBulkEmailAccess, validateEmail, handleValidationErrors, checkLeadsLimit, validateSearch } = require('../middlewares/validate');
 const { upload } = require('../middlewares/upload');
 const { generateOrRewriteEmail } = require('../controllers/gptContoroller');
 const { submitContactForm } = require('../controllers/contactController');
@@ -24,7 +24,7 @@ router.get('/profile', verifyToken, getProfile);
 
 router.get('/stats', verifyToken, getDashboardStats);
 
-router.get('/search', verifyToken, checkLeadsLimit, leadControllers.searchLeads);
+router.get('/search', verifyToken, checkLeadsLimit, validateSearch, leadControllers.searchLeads);
 router.post('/save-lead', verifyToken, checkLeadsLimit, leadControllers.saveLead);
 router.get('/get-my-Leads', verifyToken, leadControllers.getMyLeads);
 router.put('/leads/:leadId/status', verifyToken, leadControllers.updateLeadStatus);

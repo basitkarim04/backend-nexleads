@@ -1,622 +1,439 @@
-const axios = require('axios');
-const { Builder, By, until, Key } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { fetchGPTLeads } = require('../controllers/gptContoroller');
+/**
+ * leadFetcher.js
+ * Production-ready lead fetching using ScraperAPI Structured Endpoint (JSON)
+ * + per-platform deep-link scraping for LinkedIn, Upwork, Twitter, Facebook, Reddit
+ */
 
-class FacebookLeadFetcher {
-  constructor() {
-    this.driver = null;
-    this.isLoggedIn = false;
+const axios   = require('axios');
+const cheerio = require('cheerio');
+
+// ─── Environment Validation ───────────────────────────────────────────────────
+
+function validateEnv() {
+  if (!process.env.SCRAPER_API_KEY) {
+    throw new Error('Missing required environment variable: SCRAPER_API_KEY');
   }
+}
 
-  /**
-   * Initialize Chrome driver with stealth settings
-   */
-  async initialize() {
+// ─── Logger ───────────────────────────────────────────────────────────────────
+
+const logger = {
+  info:  (msg, meta = {}) => console.log(`[INFO]  ${new Date().toISOString()} ${msg}`, Object.keys(meta).length ? meta : ''),
+  warn:  (msg, meta = {}) => console.warn(`[WARN]  ${new Date().toISOString()} ${msg}`, Object.keys(meta).length ? meta : ''),
+  error: (msg, meta = {}) => console.error(`[ERROR] ${new Date().toISOString()} ${msg}`, Object.keys(meta).length ? meta : ''),
+};
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// ScraperAPI structured Google Search endpoint — returns clean JSON, no HTML parsing needed
+const SCRAPER_GOOGLE_JSON_URL = 'https://api.scraperapi.com/structured/google/search';
+// Generic scrape endpoint for deep-fetching individual pages
+const SCRAPER_PAGE_URL        = 'http://api.scraperapi.com';
+
+const MAX_RETRIES    = 3;
+const RETRY_DELAY_MS = 2000;
+const MAX_PAGES      = 3; // up to 30 organic results per platform
+
+// In-memory cache: cacheKey → { ts, leads }
+const cache        = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/** Extract unique, valid-looking emails from a text blob */
+function extractEmails(text) {
+  if (!text) return [];
+  const raw = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) || [];
+  return [...new Set(raw)].filter(e =>
+    !e.includes('example.com') &&
+    !e.includes('test.com') &&
+    !e.includes('sentry.io') &&
+    !e.endsWith('.png') &&
+    !e.endsWith('.jpg')
+  );
+}
+
+/**
+ * Build the client-focused Google query.
+ * When a non-Google platform is specified, add site: to constrain results.
+ */
+function buildSearchQuery(keyword, platform = 'Google') {
+  const k = keyword.trim();
+  let q = `"looking for ${k}" OR "hiring ${k}" OR "need ${k}" OR "seeking ${k}" OR "require ${k}"`;
+  q += ` -freelancer -freelance -hireme -"I am ${k}" -"I'm a ${k}"`;
+
+  const siteMap = {
+    LinkedIn: 'site:linkedin.com',
+    Upwork:   'site:upwork.com',
+    Twitter:  'site:twitter.com OR site:x.com',
+    Facebook: 'site:facebook.com',
+    Reddit:   'site:reddit.com',
+  };
+  if (siteMap[platform]) q += ` ${siteMap[platform]}`;
+  return q;
+}
+
+/** Infer company name from a URL */
+function domainToCompany(url) {
+  try {
+    return new URL(url).hostname
+      .replace(/^www\./, '')
+      .split('.')[0]
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+  } catch { return null; }
+}
+
+/** Map a URL back to a platform label */
+function detectPlatform(url = '') {
+  if (url.includes('linkedin.com'))                      return 'LinkedIn';
+  if (url.includes('upwork.com'))                        return 'Upwork';
+  if (url.includes('twitter.com') || url.includes('x.com')) return 'Twitter';
+  if (url.includes('facebook.com'))                      return 'Facebook';
+  if (url.includes('reddit.com'))                        return 'Reddit';
+  if (url.includes('indeed.com'))                        return 'Indeed';
+  return 'Google';
+}
+
+// ─── ScraperAPI: Structured Google Search → clean JSON ───────────────────────
+
+/**
+ * Calls ScraperAPI's /structured/google/search endpoint.
+ * Returns JSON with organic_results[], no brittle HTML selectors required.
+ * Docs: https://docs.scraperapi.com/making-requests/structured-data-collection/google-search
+ */
+async function fetchStructuredSERP(query, page = 0) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const options = new chrome.Options();
-
-      // Stealth settings to avoid detection
-      options.addArguments('--disable-blink-features=AutomationControlled');
-      options.addArguments('--disable-dev-shm-usage');
-      options.addArguments('--no-sandbox');
-      options.addArguments('--disable-gpu');
-      options.addArguments('--window-size=1920,1080');
-      options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36');
-
-      // Optional: Run in headless mode (comment out to see browser)
-      // options.addArguments('--headless=new');
-
-      this.driver = await new Builder()
-        .forBrowser('chrome')
-        .setChromeOptions(options)
-        .build();
-
-      console.log('Chrome driver initialized successfully');
-      return true;
-    } catch (error) {
-      console.error('Error initializing driver:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Login to Facebook
-   */
-  async login(email, password) {
-    try {
-      console.log('Navigating to Facebook login page...');
-      await this.driver.get('https://www.facebook.com/');
-
-      // Wait for page to load
-      await this.driver.sleep(2000);
-
-      // Find and fill email
-      const emailField = await this.driver.wait(
-        until.elementLocated(By.id('email')),
-        10000
-      );
-      await emailField.clear();
-      await emailField.sendKeys(email);
-
-      // Find and fill password
-      const passwordField = await this.driver.findElement(By.id('pass'));
-      await passwordField.clear();
-      await passwordField.sendKeys(password);
-
-      // Click login button
-      const loginButton = await this.driver.findElement(
-        By.name('login')
-      );
-      await loginButton.click();
-
-      console.log('Login credentials submitted, waiting for redirect...');
-
-      // Wait for successful login (check for homepage elements)
-      await this.driver.sleep(5000);
-
-      // Check if login was successful by looking for home page elements
-      try {
-        await this.driver.wait(
-          until.elementLocated(By.css('[aria-label="Home"]')),
-          15000
-        );
-        console.log('Login successful!');
-        this.isLoggedIn = true;
-        return true;
-      } catch (error) {
-        console.log('Checking for 2FA or security check...');
-        // Handle 2FA if present
-        const currentUrl = await this.driver.getCurrentUrl();
-        if (currentUrl.includes('checkpoint') || currentUrl.includes('two_factor')) {
-          console.log('⚠️  Two-factor authentication required. Please complete it manually in the browser.');
-          console.log('Waiting 60 seconds for manual 2FA completion...');
-          await this.driver.sleep(60000);
-
-          // Check again after 2FA wait
-          try {
-            await this.driver.wait(
-              until.elementLocated(By.css('[aria-label="Home"]')),
-              5000
-            );
-            console.log('Login successful after 2FA!');
-            this.isLoggedIn = true;
-            return true;
-          } catch (err) {
-            throw new Error('Login failed even after 2FA wait');
-          }
-        }
-        throw new Error('Login failed - could not find home page elements');
-      }
-    } catch (error) {
-      console.error('Error during login:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Search for leads on Facebook
-   */
-  async searchLeads(keyword, options = {}) {
-    try {
-      if (!this.isLoggedIn) {
-        throw new Error('Not logged in. Please login first.');
-      }
-
-      const {
-        searchType = 'people', // 'people', 'pages', 'groups', 'posts'
-        location = '',
-        limit = 10
-      } = options;
-
-      console.log(`Searching for: ${keyword} (Type: ${searchType})`);
-
-      // Navigate to Facebook search
-      const searchUrl = `https://www.facebook.com/search/top/?q=${encodeURIComponent(keyword)}`;
-      await this.driver.get(searchUrl);
-      await this.driver.sleep(3000);
-
-      // Click on specific search filter (People, Pages, etc.)
-      try {
-        let filterSelector;
-        switch (searchType) {
-          case 'people':
-            filterSelector = '//span[text()="People"]';
-            break;
-          case 'pages':
-            filterSelector = '//span[text()="Pages"]';
-            break;
-          case 'groups':
-            filterSelector = '//span[text()="Groups"]';
-            break;
-          case 'posts':
-            filterSelector = '//span[text()="Posts"]';
-            break;
-          default:
-            filterSelector = '//span[text()="People"]';
-        }
-
-        const filterButton = await this.driver.wait(
-          until.elementLocated(By.xpath(filterSelector)),
-          10000
-        );
-        await filterButton.click();
-        await this.driver.sleep(3000);
-      } catch (error) {
-        console.log('Could not click filter, continuing with top results...');
-      }
-
-      // Scroll to load more results
-      console.log('Scrolling to load results...');
-      await this.scrollPage(3);
-
-      // Extract lead data based on search type
-      let leads = [];
-      if (searchType === 'people') {
-        leads = await this.extractPeopleLeads(keyword, limit);
-      } else if (searchType === 'pages') {
-        leads = await this.extractPageLeads(keyword, limit);
-      } else if (searchType === 'groups') {
-        leads = await this.extractGroupLeads(keyword, limit);
-      }
-
-      console.log(`Found ${leads.length} leads`);
-      return leads;
-
-    } catch (error) {
-      console.error('Error searching leads:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Extract people leads from search results
-   */
-  async extractPeopleLeads(keyword, limit) {
-    const leads = [];
-
-    try {
-      // Find all people result cards
-      const resultCards = await this.driver.findElements(
-        By.css('div[role="article"]')
-      );
-
-      console.log(`Found ${resultCards.length} result cards`);
-
-      for (let i = 0; i < Math.min(resultCards.length, limit); i++) {
-        try {
-          const card = resultCards[i];
-
-          // Extract name
-          let name = 'N/A';
-          try {
-            const nameElement = await card.findElement(
-              By.css('a[role="link"] span')
-            );
-            name = await nameElement.getText();
-          } catch (err) {
-            console.log('Could not extract name from card');
-          }
-
-          // Extract profile URL
-          let profileUrl = '';
-          try {
-            const linkElement = await card.findElement(
-              By.css('a[role="link"]')
-            );
-            profileUrl = await linkElement.getAttribute('href');
-            // Clean URL
-            profileUrl = profileUrl.split('?')[0];
-          } catch (err) {
-            console.log('Could not extract profile URL');
-          }
-
-          // Extract additional info (headline, mutual friends, etc.)
-          let headline = '';
-          let mutualFriends = '';
-          try {
-            const infoElements = await card.findElements(By.css('span'));
-            for (let elem of infoElements) {
-              const text = await elem.getText();
-              if (text && text.length > 0 && text.length < 200) {
-                if (!headline && text !== name) {
-                  headline = text;
-                } else if (text.includes('mutual friend')) {
-                  mutualFriends = text;
-                }
-              }
-            }
-          } catch (err) {
-            console.log('Could not extract additional info');
-          }
-
-          if (name !== 'N/A' && profileUrl) {
-            leads.push({
-              name,
-              platform: 'Facebook',
-              jobField: keyword,
-              jobTitle: headline || 'N/A',
-              company: 'N/A',
-              location: 'N/A',
-              profileUrl,
-              mutualFriends,
-              email: '', // Facebook doesn't show emails in search
-              additionalInfo: headline
-            });
-
-            console.log(`Extracted lead ${i + 1}: ${name}`);
-          }
-
-        } catch (error) {
-          console.log(`Error extracting data from card ${i}:`, error.message);
-          continue;
-        }
-      }
-
-    } catch (error) {
-      console.error('Error extracting people leads:', error);
-    }
-
-    return leads;
-  }
-
-  /**
-   * Extract page leads from search results
-   */
-  async extractPageLeads(keyword, limit) {
-    const leads = [];
-
-    try {
-      const resultCards = await this.driver.findElements(
-        By.css('div[role="article"]')
-      );
-
-      for (let i = 0; i < Math.min(resultCards.length, limit); i++) {
-        try {
-          const card = resultCards[i];
-
-          let name = 'N/A';
-          let profileUrl = '';
-          let category = '';
-          let followers = '';
-
-          try {
-            const nameElement = await card.findElement(By.css('a span'));
-            name = await nameElement.getText();
-
-            const linkElement = await card.findElement(By.css('a'));
-            profileUrl = await linkElement.getAttribute('href');
-            profileUrl = profileUrl.split('?')[0];
-
-            const infoElements = await card.findElements(By.css('span'));
-            for (let elem of infoElements) {
-              const text = await elem.getText();
-              if (text.includes('followers') || text.includes('likes')) {
-                followers = text;
-              } else if (!category && text !== name && text.length < 100) {
-                category = text;
-              }
-            }
-          } catch (err) {
-            console.log('Could not extract page info');
-          }
-
-          if (name !== 'N/A' && profileUrl) {
-            leads.push({
-              name,
-              platform: 'Facebook',
-              jobField: keyword,
-              jobTitle: category || 'Facebook Page',
-              company: name,
-              location: 'N/A',
-              profileUrl,
-              email: '',
-              additionalInfo: `${category} - ${followers}`,
-              pageCategory: category,
-              pageFollowers: followers
-            });
-
-            console.log(`Extracted page ${i + 1}: ${name}`);
-          }
-
-        } catch (error) {
-          console.log(`Error extracting page ${i}:`, error.message);
-          continue;
-        }
-      }
-
-    } catch (error) {
-      console.error('Error extracting page leads:', error);
-    }
-
-    return leads;
-  }
-
-  /**
-   * Extract group leads from search results
-   */
-  async extractGroupLeads(keyword, limit) {
-    const leads = [];
-
-    try {
-      const resultCards = await this.driver.findElements(
-        By.css('div[role="article"]')
-      );
-
-      for (let i = 0; i < Math.min(resultCards.length, limit); i++) {
-        try {
-          const card = resultCards[i];
-
-          let name = 'N/A';
-          let profileUrl = '';
-          let members = '';
-          let privacy = '';
-
-          try {
-            const nameElement = await card.findElement(By.css('a span'));
-            name = await nameElement.getText();
-
-            const linkElement = await card.findElement(By.css('a'));
-            profileUrl = await linkElement.getAttribute('href');
-            profileUrl = profileUrl.split('?')[0];
-
-            const infoElements = await card.findElements(By.css('span'));
-            for (let elem of infoElements) {
-              const text = await elem.getText();
-              if (text.includes('members') || text.includes('member')) {
-                members = text;
-              } else if (text.includes('Public') || text.includes('Private')) {
-                privacy = text;
-              }
-            }
-          } catch (err) {
-            console.log('Could not extract group info');
-          }
-
-          if (name !== 'N/A' && profileUrl) {
-            leads.push({
-              name,
-              platform: 'Facebook',
-              jobField: keyword,
-              jobTitle: 'Facebook Group',
-              company: name,
-              location: 'N/A',
-              profileUrl,
-              email: '',
-              additionalInfo: `${privacy} - ${members}`,
-              groupMembers: members,
-              groupPrivacy: privacy
-            });
-
-            console.log(`Extracted group ${i + 1}: ${name}`);
-          }
-
-        } catch (error) {
-          console.log(`Error extracting group ${i}:`, error.message);
-          continue;
-        }
-      }
-
-    } catch (error) {
-      console.error('Error extracting group leads:', error);
-    }
-
-    return leads;
-  }
-
-  /**
-   * Scroll page to load more results
-   */
-  async scrollPage(times = 3) {
-    for (let i = 0; i < times; i++) {
-      await this.driver.executeScript('window.scrollTo(0, document.body.scrollHeight)');
-      await this.driver.sleep(2000);
-    }
-  }
-
-  /**
-   * Take screenshot for debugging
-   */
-  async takeScreenshot(filename = 'screenshot.png') {
-    try {
-      const screenshot = await this.driver.takeScreenshot();
-      require('fs').writeFileSync(filename, screenshot, 'base64');
-      console.log(`Screenshot saved as ${filename}`);
-    } catch (error) {
-      console.error('Error taking screenshot:', error);
-    }
-  }
-
-  /**
-   * Close the browser
-   */
-  async close() {
-    if (this.driver) {
-      await this.driver.quit();
-      console.log('Browser closed');
+      logger.info(`Structured SERP request`, { query: query.slice(0, 80), page: page + 1, attempt });
+      const { data } = await axios.get(SCRAPER_GOOGLE_JSON_URL, {
+        params: {
+          api_key:      process.env.SCRAPER_API_KEY,
+          query,
+          page:         page + 1,   // ScraperAPI is 1-indexed
+          num:          10,
+          country_code: 'us',
+          output:       'json',
+        },
+        timeout: 30000,
+      });
+      return data;
+    } catch (err) {
+      const isLast = attempt === MAX_RETRIES;
+      logger.warn(`SERP attempt ${attempt} failed: ${err.message}`, { isLast });
+      if (isLast) throw new Error(`ScraperAPI SERP failed after ${MAX_RETRIES} retries: ${err.message}`);
+      await sleep(RETRY_DELAY_MS * attempt);
     }
   }
 }
 
-exports.fetchLinkedInLeads = async (keyword, filters) => {
-  // Simulated LinkedIn API integration
-  // In production, integrate with LinkedIn API or scraping service
-  return [
-    {
-      name: 'John Doe',
-      email: 'john.doe@example.com',
-      platform: 'LinkedIn',
-      jobField: keyword,
-      jobTitle: 'Senior Developer',
-      company: 'Tech Corp',
-      location: 'New York, NY',
-      profileUrl: 'https://linkedin.com/in/johndoe',
-    },
-  ];
-};
+/** Pull organic results out of the structured JSON */
+function parseStructuredResults(data) {
+  const organic = data?.organic_results || [];
+  return organic
+    .map(r => ({
+      title:   r.title   || '',
+      url:     r.link    || r.url || '',
+      snippet: r.snippet || r.description || '',
+    }))
+    .filter(r => r.url && r.title);
+}
 
-exports.fetchUpworkLeads = async (keyword, filters) => {
-  // Simulated Upwork API integration
-  return [
-    {
-      name: 'Jane Smith',
-      email: 'jane.smith@example.com',
-      platform: 'Upwork',
-      jobField: keyword,
-      jobTitle: 'Web Designer',
-      company: 'Freelancer',
-      location: 'Remote',
-      profileUrl: 'https://upwork.com/freelancers/janesmith',
-    },
-  ];
-};
+// ─── ScraperAPI: Deep-fetch an individual page ────────────────────────────────
 
-exports.fetchTwitterLeads = async (keyword, filters) => {
-  // Simulated Twitter API integration
-  return [
-    {
-      name: 'Mike Johnson',
-      email: 'mike.j@example.com',
-      platform: 'Twitter',
-      jobField: keyword,
-      jobTitle: 'Marketing Specialist',
-      company: 'Digital Agency',
-      location: 'Los Angeles, CA',
-      profileUrl: 'https://twitter.com/mikej',
-    },
-  ];
-};
-
-exports.fetchFacebookLeads = async (keyword, filters = {}) => {
-  const scraper = new FacebookLeadFetcher();
-
+async function fetchPageContent(url) {
   try {
-    // Initialize browser
-    await scraper.initialize();
-
-    // Login with credentials from environment variables
-    const fbEmail = process.env.FACEBOOK_EMAIL;
-    const fbPassword = process.env.FACEBOOK_PASSWORD;
-
-    if (!fbEmail || !fbPassword) {
-      throw new Error('Facebook credentials not found in environment variables');
-    }
-
-    await scraper.login(fbEmail, fbPassword);
-
-    // Search for leads
-    const searchOptions = {
-      searchType: filters.searchType || 'people', // 'people', 'pages', 'groups'
-      location: filters.location || '',
-      limit: filters.limit || 10
-    };
-
-    const leads = await scraper.searchLeads(keyword, searchOptions);
-
-    // Optional: Take screenshot for debugging
-    // await scraper.takeScreenshot('facebook_search.png');
-
-    return leads;
-
-  } catch (error) {
-    console.error('Error fetching Facebook leads:', error);
-    throw error;
-  } finally {
-    // Always close the browser
-    await scraper.close();
+    const { data } = await axios.get(SCRAPER_PAGE_URL, {
+      params: { api_key: process.env.SCRAPER_API_KEY, url, render: false },
+      timeout: 25000,
+    });
+    return typeof data === 'string' ? data : JSON.stringify(data);
+  } catch (err) {
+    logger.warn(`Page fetch failed: ${url.slice(0, 60)}`, { error: err.message });
+    return '';
   }
-};
+}
 
+// ─── Platform-specific page parsers ──────────────────────────────────────────
+// Each receives raw HTML + source URL, returns { name, company, location, emails }
 
-exports.fetchLeadsFromPlatforms = async (keyword, platforms, filters) => {
-  const leads = [];
+function parseLinkedInPage(html, url) {
+  const $ = cheerio.load(html);
+  return {
+    name:     $('h1').first().text().trim() || null,
+    company:  $('.top-card-layout__company, .org-top-card__name').first().text().trim() || domainToCompany(url),
+    location: $('.top-card__subline-item, .org-top-card__location').first().text().trim() || null,
+    emails:   extractEmails($('body').text()),
+  };
+}
 
-  // if (platforms.includes('LinkedIn')) {
-  //   const linkedInLeads = await exports.fetchLinkedInLeads(keyword, filters);
-  //   leads.push(...linkedInLeads);
-  // }
+function parseUpworkPage(html, url) {
+  const $ = cheerio.load(html);
+  return {
+    name:     $('h1, h2').first().text().trim() || null,
+    company:  $('[data-test="client-name"], .client-name').first().text().trim() || null,
+    location: $('[data-test="client-location"], .client-location').first().text().trim() || null,
+    emails:   extractEmails($('body').text()),
+  };
+}
 
-  // if (platforms.includes('Upwork')) {
-  //   const upworkLeads = await exports.fetchUpworkLeads(keyword, filters);
-  //   leads.push(...upworkLeads);
-  // }
+function parseTwitterPage(html) {
+  const $ = cheerio.load(html);
+  return {
+    name:     $('[data-testid="UserName"] span, .username').first().text().trim() || null,
+    company:  null,
+    location: null,
+    emails:   extractEmails($('body').text()),
+  };
+}
 
-  // if (platforms.includes('Twitter')) {
-  //   const twitterLeads = await exports.fetchTwitterLeads(keyword, filters);
-  //   leads.push(...twitterLeads);
-  // }
+function parseFacebookPage(html) {
+  const $ = cheerio.load(html);
+  return { name: null, company: null, location: null, emails: extractEmails($('body').text()) };
+}
 
-  const gptLeads = await fetchGPTLeads(keyword, 10);
-  leads.push(...gptLeads);
+function parseRedditPage(html) {
+  const $ = cheerio.load(html);
+  const postText = $('[data-testid="post-container"], .usertext-body, #siteTable').text()
+    || $('body').text();
+  return {
+    name:     $('.author, [data-testid="post_author_link"]').first().text().trim() || null,
+    company:  null,
+    location: null,
+    emails:   extractEmails(postText),
+  };
+}
 
-  return leads;
-};
+function parseGenericPage(html, url) {
+  const $ = cheerio.load(html);
+  return {
+    name:     $('h1').first().text().trim() || null,
+    company:  domainToCompany(url),
+    location: null,
+    emails:   extractEmails($('body').text()),
+  };
+}
 
+/** Route to the right parser */
+function parsePage(html, url) {
+  switch (detectPlatform(url)) {
+    case 'LinkedIn': return parseLinkedInPage(html, url);
+    case 'Upwork':   return parseUpworkPage(html, url);
+    case 'Twitter':  return parseTwitterPage(html);
+    case 'Facebook': return parseFacebookPage(html);
+    case 'Reddit':   return parseRedditPage(html);
+    default:         return parseGenericPage(html, url);
+  }
+}
 
+// ─── Optional GPT Filter ─────────────────────────────────────────────────────
 
-// exports.testFacebookScraper = async () => {
-async function testFacebookScraper() {
-  const scraper = new FacebookLeadFetcher();
-
+async function isClientPost(title, snippet) {
+  if (!process.env.OPENAI_API_KEY) return true;
   try {
-    // 1. Initialize
-    await scraper.initialize();
-
-    console.log("scraperinitialize")
-
-    // 2. Login
-    await scraper.login(
-      process.env.FACEBOOK_EMAIL,
-      process.env.FACEBOOK_PASSWORD
+    const { data } = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        max_tokens: 5,
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Classify this search result. Reply ONLY with CLIENT (someone HIRING), ' +
+              'FREELANCER (someone offering their own services), or OTHER.',
+          },
+          { role: 'user', content: `Title: ${title}\nSnippet: ${snippet}` },
+        ],
+      },
+      {
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+        timeout: 15000,
+      }
     );
-
-    // 3. Search for people
-    const peopleLeads = await scraper.searchLeads('web developer', {
-      searchType: 'people',
-      limit: 10
-    });
-    console.log('People Leads:', peopleLeads);
-
-    // 4. Search for pages
-    const pageLeads = await scraper.searchLeads('digital marketing agency', {
-      searchType: 'pages',
-      limit: 5
-    });
-    console.log('Page Leads:', pageLeads);
-
-    // 5. Search for groups
-    const groupLeads = await scraper.searchLeads('freelance developers', {
-      searchType: 'groups',
-      limit: 5
-    });
-    console.log('Group Leads:', groupLeads);
-
-  } catch (error) {
-    console.error('Error:', error);
-  } finally {
-    await scraper.close();
+    return data.choices?.[0]?.message?.content?.trim().toUpperCase() === 'CLIENT';
+  } catch (err) {
+    logger.warn('GPT filter failed, including by default', { error: err.message });
+    return true; // fail open
   }
 }
 
-// Uncomment to test
-// testFacebookScraper();
+// ─── Date Filter ─────────────────────────────────────────────────────────────
+
+function applyDateFilters(leads, { dateFrom, dateTo } = {}) {
+  if (!dateFrom && !dateTo) return leads;
+  return leads.filter(({ fetchedAt: ts }) => {
+    if (dateFrom && ts < dateFrom) return false;
+    if (dateTo   && ts > dateTo)   return false;
+    return true;
+  });
+}
+
+// ─── Core: fetchLeadsForPlatform ──────────────────────────────────────────────
+
+/**
+ * Unified lead fetcher for any platform.
+ *
+ * Flow:
+ *  1. Build Google query scoped to this platform (site:linkedin.com etc.)
+ *  2. Call ScraperAPI /structured/google/search → clean JSON list of URLs
+ *  3. For each URL: try snippet emails first, otherwise deep-fetch the page
+ *  4. Parse page with platform-specific parser to extract email + metadata
+ *  5. Return only leads with at least one valid email
+ */
+async function fetchLeadsForPlatform(keyword, platform = 'Google', filters = {}) {
+  validateEnv();
+
+  const cacheKey = `${platform.toLowerCase()}:${keyword}`;
+  const cached   = cache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    logger.info('Cache hit', { platform, keyword, count: cached.leads.length });
+    return cached.leads;
+  }
+
+  const query = buildSearchQuery(keyword, platform);
+  logger.info(`Starting fetch`, { platform, keyword });
+  logger.info(`Query: ${query}`);
+
+  const allResults = [];
+
+  // Step 1 — collect SERP results
+  for (let page = 0; page < MAX_PAGES; page++) {
+    try {
+      const serpData = await fetchStructuredSERP(query, page);
+      const results  = parseStructuredResults(serpData);
+      logger.info(`${platform} SERP page ${page + 1}: ${results.length} results`);
+      allResults.push(...results);
+      if (results.length < 10) break; // last page
+      await sleep(800);
+    } catch (err) {
+      logger.error(`SERP page ${page + 1} failed`, { platform, error: err.message });
+      break;
+    }
+  }
+
+  if (!allResults.length) {
+    logger.warn(`No SERP results`, { platform, keyword });
+    return [];
+  }
+
+  logger.info(`${platform}: deep-fetching ${allResults.length} URLs`);
+
+  const leads  = [];
+  const useGPT = !!process.env.OPENAI_API_KEY;
+
+  // Step 2 — deep-fetch each result URL
+  for (const result of allResults) {
+    try {
+      // Optional: GPT pre-filter using cheap snippet data (saves credits)
+      if (useGPT) {
+        const ok = await isClientPost(result.title, result.snippet);
+        if (!ok) {
+          logger.info(`GPT filtered out`, { title: result.title.slice(0, 50) });
+          continue;
+        }
+      }
+
+      // Fast path: email visible in SERP snippet
+      let emails     = extractEmails(`${result.title} ${result.snippet}`);
+      let parsedMeta = { name: null, company: null, location: null };
+
+      // Slow path: fetch the real page and parse it
+      if (!emails.length) {
+        logger.info(`Deep-fetching page`, { url: result.url.slice(0, 80) });
+        const html   = await fetchPageContent(result.url);
+        const parsed = parsePage(html, result.url);
+        emails       = parsed.emails;
+        parsedMeta   = { name: parsed.name, company: parsed.company, location: parsed.location };
+        await sleep(600); // polite delay between page fetches
+      }
+
+      if (!emails.length) {
+        logger.info(`No email found, skipping`, { url: result.url.slice(0, 80) });
+        continue;
+      }
+
+      for (const email of emails) {
+        leads.push({
+          name:          parsedMeta.name || result.title.split('|')[0].split('-')[0].trim() || null,
+          email,
+          platform:      detectPlatform(result.url) || platform,
+          jobField:      keyword,
+          jobTitle:      keyword.replace(/\b\w/g, c => c.toUpperCase()),
+          company:       parsedMeta.company || domainToCompany(result.url),
+          location:      parsedMeta.location || null,
+          profileUrl:    result.url,
+          sourceSnippet: result.snippet?.slice(0, 200),
+          fetchedAt:     new Date(),
+        });
+      }
+    } catch (err) {
+      logger.warn(`Error processing result`, { url: result.url?.slice(0, 60), error: err.message });
+    }
+  }
+
+  const filtered = applyDateFilters(leads, filters);
+
+  logger.info(`${platform} fetch complete`, {
+    serpResults:     allResults.length,
+    withEmail:       leads.length,
+    afterDateFilter: filtered.length,
+  });
+
+  cache.set(cacheKey, { ts: Date.now(), leads: filtered });
+  return filtered;
+}
+
+// ─── Convenience wrapper kept for backward compat ────────────────────────────
+
+async function fetchGoogleLeads(keyword, filters = {}) {
+  return fetchLeadsForPlatform(keyword, 'Google', filters);
+}
+
+/**
+ * Dispatch to all requested platforms in parallel and merge + dedup results.
+ */
+async function fetchLeadsFromPlatforms(keyword, platforms = [], filters = {}) {
+  const SUPPORTED = ['Google', 'LinkedIn', 'Upwork', 'Twitter', 'Facebook', 'Reddit'];
+
+  const toFetch = platforms.filter(p => {
+    const supported = SUPPORTED.some(s => s.toLowerCase() === p.toLowerCase());
+    if (!supported) logger.warn(`Unsupported platform, skipping: ${p}`);
+    return supported;
+  });
+
+  const settled = await Promise.allSettled(
+    toFetch.map(platform => fetchLeadsForPlatform(keyword, platform, filters))
+  );
+
+  const allLeads = [];
+  settled.forEach((result, i) => {
+    if (result.status === 'fulfilled') {
+      allLeads.push(...result.value);
+    } else {
+      logger.error(`${toFetch[i]} fetch failed`, { error: result.reason?.message });
+    }
+  });
+
+  // Dedup across platforms by email
+  const seen = new Set();
+  return allLeads.filter(lead => {
+    if (seen.has(lead.email)) return false;
+    seen.add(lead.email);
+    return true;
+  });
+}
+
+
+// ─── Named exports ────────────────────────────────────────────────────────────
+
+exports.validateEnv        = validateEnv;
+exports.fetchGoogleLeads        = fetchGoogleLeads;
+exports.fetchLeadsForPlatform   = fetchLeadsForPlatform;
+exports.fetchLeadsFromPlatforms = fetchLeadsFromPlatforms;
+exports.buildSearchQuery        = buildSearchQuery;
+exports.extractEmails           = extractEmails;
+exports.isClientPost            = isClientPost;
